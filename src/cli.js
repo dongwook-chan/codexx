@@ -5,7 +5,7 @@ import { clearExpiredQuota, loadState, saveState } from "./config.js";
 import { installShellIntegration, shellInit } from "./install.js";
 import { findRealCodex } from "./processes.js";
 import { pickNextProfile, runCodexSession } from "./session.js";
-import { recordQuotaForActiveProfile, scanCodexSessions } from "./quota.js";
+import { recordQuotaForActiveProfile, recordQuotaForProfile, scanCodexSessions } from "./quota.js";
 import { printProfiles, printScanSummary } from "./ui.js";
 
 const help = `cdxx - Codex CLI profile and quota helper
@@ -75,6 +75,67 @@ async function setAutoswitch(value) {
   state.settings.autoswitch = value === "on";
   await saveState(state);
   console.log(`autoswitch ${value}`);
+}
+
+function parseSupervisorPayload(encoded) {
+  if (!encoded) throw new Error("Usage: cdxx _supervisor-failover <base64-json>");
+  return JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
+}
+
+async function supervisorFailover(encoded) {
+  const payload = parseSupervisorPayload(encoded);
+  const now = new Date().toISOString();
+  const primary = Number(payload.primary ?? 0);
+  const secondary = Number(payload.secondary ?? 0);
+  const reachedType = payload.reachedType ?? null;
+  const summary = {
+    scannedFiles: 1,
+    tokenCountRecords: 1,
+    maxPrimary: primary,
+    maxSecondary: secondary,
+    firstAt: payload.timestamp ?? now,
+    lastAt: payload.timestamp ?? now,
+    planType: payload.planType,
+    lastCredits: undefined,
+    exhausted: true,
+    historicalExhausted: true,
+    exhaustedEvents: 1,
+    reason: reachedType
+      ? `rate_limit_reached_type=${reachedType}`
+      : (primary >= 100 ? "primary rate limit reached" : "secondary rate limit reached"),
+    resetAt: payload.resetAt,
+    reachedTypes: reachedType ? [String(reachedType)] : [],
+    current: {
+      file: undefined,
+      line: undefined,
+      timestamp: payload.timestamp ?? now,
+      primary,
+      secondary,
+      reachedType,
+      resetAt: payload.resetAt,
+      credits: undefined,
+      planType: payload.planType,
+    },
+    highWatermarks: [],
+  };
+  const profile = await recordQuotaForProfile(summary, payload.profileName);
+  if (!profile) {
+    console.log(JSON.stringify({ ok: false, reason: "profile_not_found" }));
+    return 0;
+  }
+  const state = await loadState();
+  if (!state.settings?.autoswitch) {
+    console.log(JSON.stringify({ ok: false, reason: "autoswitch_off" }));
+    return 0;
+  }
+  const next = pickNextProfile(state, profile.name);
+  if (!next) {
+    console.log(JSON.stringify({ ok: false, reason: "no_selectable_profile" }));
+    return 0;
+  }
+  await useProfile(next.name);
+  console.log(JSON.stringify({ ok: true, profile: next.name, sessionId: payload.sessionId }));
+  return 0;
 }
 
 async function printStatus() {
@@ -164,6 +225,8 @@ async function main() {
     case "status":
       await printStatus();
       return 0;
+    case "_supervisor-failover":
+      return await supervisorFailover(args.shift());
     default:
       throw new Error(`Unknown command: ${command}\n\n${help}`);
   }

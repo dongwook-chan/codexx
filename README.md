@@ -7,6 +7,7 @@ It provides:
 - local Codex auth profile save/use/next
 - passive quota scanning from `$CODEX_HOME/sessions`
 - optional shell integration so `codex` runs through `cdxx session`
+- a Rust native supervisor for wrapped Codex TUI processes
 - live autoswitch and `codex resume <session_id>` failover when a profile reaches quota
 
 ## Install locally
@@ -23,6 +24,17 @@ For the current terminal only:
 ```bash
 eval "$(cdxx shell-init)"
 ```
+
+Build the native supervisor locally:
+
+```bash
+npm run build:native
+```
+
+The published package currently ships a `darwin/arm64` native supervisor. The
+Rust crate and build scripts also define a Linux target, but release tarballs
+should include the matching Linux binary before the package `os` field is opened
+for Linux installs.
 
 ## Profile workflow
 
@@ -75,9 +87,9 @@ failover:
 cdxx autoswitch on
 ```
 
-With autoswitch enabled, the wrapper tails the matched Codex transcript by byte
-offset. If Codex reports an exhausted rate limit, `cdxx` terminates the current
-Codex process, switches to the next available saved profile, and starts
+With autoswitch enabled, the Rust supervisor tails the matched Codex transcript
+by byte offset. If Codex reports an exhausted rate limit, `cdxx` switches to the
+next available saved profile and the supervisor starts
 `codex resume <session_id>` from the same working directory.
 
 ## Session matching

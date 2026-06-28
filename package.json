@@ -1,6 +1,6 @@
 {
   "name": "@dong-/cdxx",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Multi-profile wrapper and live quota failover for Codex CLI",
   "type": "module",
   "bin": {
@@ -9,10 +9,17 @@
   "scripts": {
     "test": "node --test test/*.test.js",
     "check": "node --check src/*.js",
-    "prepack": "npm run check && npm test"
+    "build:native": "node scripts/build-native.cjs",
+    "check:native-package": "node scripts/check-native-package.cjs",
+    "preinstall": "node scripts/preinstall.cjs",
+    "prepack": "npm run check && npm test && npm run check:native-package"
   },
   "files": [
+    "bin/cdxx-supervisor",
+    "bin/cdxx-supervisor-darwin-arm64",
+    "bin/cdxx-supervisor-linux-arm64",
     "src",
+    "scripts/*.cjs",
     "README.md",
     "LICENSE"
   ],
@@ -40,7 +47,9 @@
     "node": ">=20"
   },
   "os": [
-    "darwin",
-    "linux"
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
   ]
 }

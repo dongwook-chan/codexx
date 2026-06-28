@@ -1,11 +1,41 @@
 import { spawn } from "node:child_process";
-import { stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access, stat } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { refreshActiveProfileCredential, useProfile } from "./auth.js";
 import { clearExpiredQuota, loadState, saveState } from "./config.js";
 import { findRealCodex } from "./processes.js";
 import { QuotaTail, wait } from "./quota_tail.js";
 import { recordQuotaForProfile, scanCodexSessions } from "./quota.js";
 import { snapshotSessionFiles, waitForMatchingSession, findMatchingSession } from "./session_match.js";
+
+const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+const supervisorPath = join(packageRoot, "bin", "cdxx-supervisor");
+
+async function findNativeSupervisor() {
+  await access(supervisorPath, constants.X_OK);
+  return supervisorPath;
+}
+
+async function runNativeCodexSession(args) {
+  const realCodex = await findRealCodex();
+  const supervisor = await findNativeSupervisor();
+  return await new Promise((resolve, reject) => {
+    const child = spawn(supervisor, args, {
+      stdio: "inherit",
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        CDXX_REAL_CODEX: realCodex,
+        CDXX_CLI_PATH: fileURLToPath(new URL("./cli.js", import.meta.url)),
+        CDXX_NODE_PATH: process.execPath,
+      },
+    });
+    child.on("error", reject);
+    child.on("exit", (code, signal) => resolve(code ?? (signal ? 128 : 1)));
+  });
+}
 
 function spawnCodex(command, args) {
   const child = spawn(command, args, { stdio: "inherit", cwd: process.cwd(), env: process.env });
@@ -145,6 +175,12 @@ async function runCodexOnce(realCodex, args) {
 }
 
 export async function runCodexSession(args) {
+  try {
+    return await runNativeCodexSession(args);
+  } catch (error) {
+    if (error?.code !== "ENOENT" && error?.code !== "EACCES") throw error;
+    console.error("[cdxx] Native supervisor is missing; falling back to JS supervisor.");
+  }
   const realCodex = await findRealCodex();
   let currentArgs = args;
   let attempts = 0;
