@@ -12,11 +12,11 @@ export function printProfiles(state) {
     email: profile.email ?? profile.accountId ?? "",
     status: profile.disabled ? "disabled" : (profile.quotaStatus ?? "unknown"),
     reset: formatReset(profile.quotaResetAt),
-    primary: profile.lastUsage?.maxPrimary ?? "",
-    secondary: profile.lastUsage?.maxSecondary ?? "",
+    fiveHour: profile.lastUsage?.maxPrimary ?? "",
+    weekly: profile.lastUsage?.maxSecondary ?? "",
     selected: profile.selectionCount ?? 0,
   }));
-  const headers = ["", "name", "account", "status", "reset", "primary", "secondary", "switches"];
+  const headers = ["", "name", "account", "status", "reset", "5h", "weekly", "switches"];
   const widths = headers.map((header, index) => Math.max(
     header.length,
     ...rows.map((row) => String(Object.values(row)[index] ?? "").length),
@@ -32,11 +32,11 @@ export function printScanSummary(summary) {
   console.log(`files: ${summary.scannedFiles}`);
   console.log(`token_count records: ${summary.tokenCountRecords}`);
   if (summary.current) {
-    console.log(`current primary: ${summary.current.primary}%`);
-    console.log(`current secondary: ${summary.current.secondary}%`);
+    console.log(`current 5h: ${summary.current.primary}%`);
+    console.log(`current weekly: ${summary.current.secondary}%`);
   }
-  console.log(`historical max primary: ${summary.maxPrimary}%`);
-  console.log(`historical max secondary: ${summary.maxSecondary}%`);
+  console.log(`historical max 5h: ${summary.maxPrimary}%`);
+  console.log(`historical max weekly: ${summary.maxSecondary}%`);
   if (summary.planType) console.log(`plan: ${summary.planType}`);
   if (summary.lastCredits) {
     console.log(`credits: has=${summary.lastCredits.has_credits ?? ""} balance=${summary.lastCredits.balance ?? ""}`);
@@ -50,7 +50,7 @@ export function printScanSummary(summary) {
     console.log("");
     console.log("recent high-water marks:");
     for (const event of recent) {
-      console.log(`${event.timestamp} primary=${event.primary}% secondary=${event.secondary}% ${event.file}:${event.line}`);
+      console.log(`${event.timestamp} 5h=${event.primary}% weekly=${event.secondary}% ${event.file}:${event.line}`);
     }
   }
 }

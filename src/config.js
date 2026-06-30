@@ -37,10 +37,15 @@ export function emptyState() {
     realCodexPath: undefined,
     settings: {
       autoswitch: false,
+      yolo: true,
     },
     profiles: [],
     sessions: {},
   };
+}
+
+export function effectiveYoloMode(state) {
+  return state.settings?.yolo ?? true;
 }
 
 export async function loadState() {
@@ -73,6 +78,28 @@ export function validateProfileName(input) {
     throw new Error("Profile names must be 1-64 chars: letters, numbers, dot, underscore, dash.");
   }
   return name;
+}
+
+export function profileNameFromIdentity(identity) {
+  const source = String(identity ?? "").split("@")[0] ?? "";
+  const normalized = source
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^[._-]+|[._-]+$/g, "")
+    .replace(/[._-]{2,}/g, "-")
+    .slice(0, 64);
+  return validateProfileName(normalized || "account");
+}
+
+export function uniqueProfileName(baseName, state) {
+  const base = validateProfileName(baseName);
+  const names = new Set(state.profiles.map((profile) => profile.name));
+  if (!names.has(base)) return base;
+  for (let suffix = 2; suffix < 10000; suffix += 1) {
+    const candidate = `${base.slice(0, Math.max(1, 64 - String(suffix).length - 1))}-${suffix}`;
+    if (!names.has(candidate)) return candidate;
+  }
+  throw new Error(`Could not find an unused profile name for '${base}'.`);
 }
 
 export function getProfile(state, name) {

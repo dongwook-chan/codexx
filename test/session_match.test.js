@@ -4,6 +4,9 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
+  pickNextProfile,
+} from "../src/session.js";
+import {
   findMatchingSession,
   snapshotSessionFiles,
   waitForMatchingSession,
@@ -128,4 +131,16 @@ test("waitForMatchingSession notices a session created after polling starts", as
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("pickNextProfile starts at first profile when active profile is missing", () => {
+  const state = {
+    activeProfile: undefined,
+    profiles: [
+      { name: "a", quotaStatus: "available" },
+      { name: "b", quotaStatus: "available" },
+    ],
+  };
+
+  assert.equal(pickNextProfile(state).name, "a");
 });

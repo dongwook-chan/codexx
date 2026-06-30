@@ -7,7 +7,7 @@ It provides:
 - local Codex auth profile save/use/next
 - passive quota scanning from `$CODEX_HOME/sessions`
 - optional shell integration so `codex` runs through `cdxx session`
-- a Rust native supervisor for wrapped Codex TUI processes
+- a Rust native supervisor for wrapped Codex TUI processes, with a Node supervisor fallback
 - live autoswitch and `codex resume <session_id>` failover when a profile reaches quota
 
 ## Install locally
@@ -31,14 +31,47 @@ Build the native supervisor locally:
 npm run build:native
 ```
 
-The published package currently ships a `darwin/arm64` native supervisor. The
-Rust crate and build scripts also define a Linux target, but release tarballs
-should include the matching Linux binary before the package `os` field is opened
-for Linux installs.
+## Native supervisor support
+
+`cdxx session` first tries to run the Rust native supervisor for the current
+host. If the matching native binary is not present, it falls back to the Node
+supervisor with the same behavior. Set `CDXX_REQUIRE_NATIVE_SUPERVISOR=1` to
+fail instead of falling back.
+
+Native supervisor target status:
+
+| host | Rust source/build support | shipped by this package |
+| --- | --- | --- |
+| `darwin/arm64` | yes | yes |
+| `linux/arm64` | yes | not currently |
+
+The package install policy is currently `darwin/arm64`. The Rust crate and build
+scripts can build `linux/arm64`, but release tarballs should include
+`bin/cdxx-supervisor-linux-arm64` before Linux installs are enabled.
+
+Native and Node supervisors are expected to agree on observable behavior:
+non-interactive Codex commands are passed through directly, interactive TUI
+sessions are monitored for quota events, and autoswitch resumes the same Codex
+session with `codex resume <session_id>`.
+
+The native supervisor intentionally does not decide account policy itself. When
+it sees a quota event, it calls the JS policy helper (`cdxx
+_supervisor-failover`) and receives an action JSON payload such as
+`switch_and_resume` or `stop_retrying`. The helper owns profile selection,
+autoswitch-off handling, no-selectable-profile handling, and user-facing
+messages; the supervisor only prints the helper message and performs the
+requested process action. This keeps native and Node supervisor behavior aligned.
 
 ## Profile workflow
 
 Save the currently active Codex login:
+
+```bash
+cdxx save
+```
+
+When the name is omitted, `cdxx` derives one from the active Codex account email
+or account id. You can still provide an explicit name:
 
 ```bash
 cdxx save personal
@@ -47,13 +80,14 @@ cdxx save personal
 Add another profile:
 
 ```bash
-cdxx login work
+cdxx login
 ```
 
 Switch profiles:
 
 ```bash
 cdxx list
+cdxx use
 cdxx use personal
 cdxx next
 cdxx current
@@ -65,6 +99,10 @@ with owner-only permissions. The active Codex credential remains
 
 ## Quota workflow
 
+Codex records two quota windows in session JSONL as `primary` and `secondary`.
+`cdxx` displays them as `5h` and `weekly`: `primary` is the 5-hour window
+(`300` minutes), and `secondary` is the weekly window (`10080` minutes).
+
 Scan local Codex session transcripts:
 
 ```bash
@@ -72,6 +110,19 @@ cdxx scan
 cdxx scan --json
 cdxx scan --json --full
 ```
+
+`cdxx` defaults to yolo mode for supervised Codex sessions. It injects Codex's
+own dangerous flag, `--dangerously-bypass-approvals-and-sandbox`, unless you
+already passed it yourself. Configure it with:
+
+```bash
+cdxx yolo
+cdxx yolo on
+cdxx yolo off
+```
+
+The `agy` flag `--dangerously-skip-permissions` is rejected when passed through
+`cdxx`; it is not a Codex option.
 
 Run Codex through the wrapper:
 
@@ -92,6 +143,14 @@ by byte offset. If Codex reports an exhausted rate limit, `cdxx` switches to the
 next available saved profile and the supervisor starts
 `codex resume <session_id>` from the same working directory.
 
+The Node fallback follows the same pass-through and failover rules as the native
+supervisor. Non-interactive commands such as `codex exec`, `codex review`,
+`codex login`, and `codex doctor` are not supervised.
+
+If every saved profile is disabled, exhausted, or otherwise not selectable,
+`cdxx` prints a stop message and suppresses further failover attempts for that
+quota event.
+
 ## Session matching
 
 Codex does not expose an `agy --log-file` style TUI transcript path option.
@@ -110,6 +169,7 @@ The matched `payload.session_id`/`payload.id` is suitable for `codex resume`.
 ## Notes
 
 - `cdxx` reads Codex JSONL transcripts but does not print prompts or responses.
-- A profile is treated as exhausted when Codex reports `primary.used_percent >= 100`,
-  `secondary.used_percent >= 100`, or a non-null `rate_limit_reached_type`.
+- A profile is treated as exhausted when Codex reports 5-hour
+  `primary.used_percent >= 100`, weekly `secondary.used_percent >= 100`, or a
+  non-null `rate_limit_reached_type`.
 - Reset times are derived from the `resets_at` epoch fields stored by Codex.

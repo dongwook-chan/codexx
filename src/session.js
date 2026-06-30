@@ -1,41 +1,15 @@
 import { spawn } from "node:child_process";
-import { constants } from "node:fs";
-import { access, stat } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { refreshActiveProfileCredential, useProfile } from "./auth.js";
-import { clearExpiredQuota, loadState, saveState } from "./config.js";
-import { findRealCodex } from "./processes.js";
+import { stat } from "node:fs/promises";
+import { refreshActiveProfileCredential } from "./auth.js";
+import { loadState, saveState } from "./config.js";
+import { decideCodexFailover } from "./failover_policy.js";
+import { buildCodexLaunchArgsFromState } from "./launch_args.js";
+import { runNativeSupervisor } from "./native.js";
+import { findRealCodex, isInteractiveCodex } from "./processes.js";
 import { QuotaTail, wait } from "./quota_tail.js";
 import { recordQuotaForProfile, scanCodexSessions } from "./quota.js";
 import { snapshotSessionFiles, waitForMatchingSession, findMatchingSession } from "./session_match.js";
-
-const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
-const supervisorPath = join(packageRoot, "bin", "cdxx-supervisor");
-
-async function findNativeSupervisor() {
-  await access(supervisorPath, constants.X_OK);
-  return supervisorPath;
-}
-
-async function runNativeCodexSession(args) {
-  const realCodex = await findRealCodex();
-  const supervisor = await findNativeSupervisor();
-  return await new Promise((resolve, reject) => {
-    const child = spawn(supervisor, args, {
-      stdio: "inherit",
-      cwd: process.cwd(),
-      env: {
-        ...process.env,
-        CDXX_REAL_CODEX: realCodex,
-        CDXX_CLI_PATH: fileURLToPath(new URL("./cli.js", import.meta.url)),
-        CDXX_NODE_PATH: process.execPath,
-      },
-    });
-    child.on("error", reject);
-    child.on("exit", (code, signal) => resolve(code ?? (signal ? 128 : 1)));
-  });
-}
+export { pickNextProfile } from "./selection.js";
 
 function spawnCodex(command, args) {
   const child = spawn(command, args, { stdio: "inherit", cwd: process.cwd(), env: process.env });
@@ -65,12 +39,6 @@ function describeReset(profile) {
   return profile.quotaResetAt ? `; reset at ${profile.quotaResetAt}` : "";
 }
 
-async function pickFailoverProfile(exhaustedName) {
-  const state = await loadState();
-  if (!state.settings?.autoswitch) return undefined;
-  return pickNextProfile(state, exhaustedName);
-}
-
 function stopChildForFailover(child) {
   if (child.exitCode !== null || child.signalCode !== null) return;
   child.kill("SIGTERM");
@@ -90,17 +58,20 @@ async function monitorMatchedSession(matchedSession, child, profileName, signal)
       const profile = await recordQuotaForProfile(summary, profileName);
       if (profile?.quotaStatus === "exhausted") {
         console.error(`[cdxx] Profile '${profile.name}' reached quota${describeReset(profile)}.`);
-        const next = await pickFailoverProfile(profile.name);
-        if (next && matchedSession.sessionId) {
-          console.error(`[cdxx] Switching to '${next.name}' and resuming ${matchedSession.sessionId}.`);
+        const action = await decideCodexFailover({
+          profileName: profile.name,
+          sessionId: matchedSession.sessionId,
+          summary,
+        });
+        if (action.message) console.error(action.message);
+        if (action.kind === "switch_and_resume" && action.profile && matchedSession.sessionId) {
           stopChildForFailover(child);
           return {
             sessionId: matchedSession.sessionId,
             fromProfile: profile.name,
-            toProfile: next.name,
+            toProfile: action.profile,
           };
         }
-        if (!next) console.error("[cdxx] Autoswitch is off or no selectable profile was found.");
         return undefined;
       }
     }
@@ -113,7 +84,8 @@ async function runCodexOnce(realCodex, args) {
   const started = Date.now();
   const profileName = (await loadState()).activeProfile;
   const before = await snapshotSessionFiles();
-  const { child, exit } = spawnCodex(realCodex, args);
+  const launchArgs = await buildCodexLaunchArgsFromState(args);
+  const { child, exit } = spawnCodex(realCodex, launchArgs);
   const matchAbort = new AbortController();
   const monitorAbort = new AbortController();
   let matchedSession;
@@ -156,18 +128,18 @@ async function runCodexOnce(realCodex, args) {
   const profile = await recordQuotaForProfile(summary, profileName);
   if (!failover && profile?.quotaStatus === "exhausted") {
     console.error(`[cdxx] Profile '${profile.name}' reached quota${describeReset(profile)}.`);
-    const next = await pickFailoverProfile(profile.name);
-    if (next && matchedSession?.sessionId) {
+    const action = await decideCodexFailover({
+      profileName: profile.name,
+      sessionId: matchedSession?.sessionId,
+      summary,
+    });
+    if (action.message) console.error(action.message);
+    if (action.kind === "switch_and_resume" && action.profile && matchedSession?.sessionId) {
       failover = {
         sessionId: matchedSession.sessionId,
         fromProfile: profile.name,
-        toProfile: next.name,
+        toProfile: action.profile,
       };
-    } else if (next) {
-      console.error(`[cdxx] Autoswitched future Codex runs to '${next.name}'.`);
-      await useProfile(next.name);
-    } else {
-      console.error("[cdxx] Autoswitch is off or no selectable profile was found.");
     }
   }
 
@@ -175,13 +147,17 @@ async function runCodexOnce(realCodex, args) {
 }
 
 export async function runCodexSession(args) {
-  try {
-    return await runNativeCodexSession(args);
-  } catch (error) {
-    if (error?.code !== "ENOENT" && error?.code !== "EACCES") throw error;
-    console.error("[cdxx] Native supervisor is missing; falling back to JS supervisor.");
-  }
   const realCodex = await findRealCodex();
+  try {
+    const nativeCode = await runNativeSupervisor(args, realCodex);
+    if (nativeCode !== undefined) return nativeCode;
+  } catch (error) {
+    if (process.env.CDXX_REQUIRE_NATIVE_SUPERVISOR === "1") throw error;
+    console.error(`[cdxx] Native supervisor failed; falling back to Node supervisor. (${error.message})`);
+  }
+  if (!isInteractiveCodex(args)) {
+    return await spawnCodex(realCodex, args).exit;
+  }
   let currentArgs = args;
   let attempts = 0;
   for (;;) {
@@ -192,23 +168,8 @@ export async function runCodexSession(args) {
       console.error("[cdxx] Stopping after 10 quota failover attempts.");
       return code;
     }
-    await useProfile(failover.toProfile);
     currentArgs = ["resume", failover.sessionId];
   }
-}
-
-export function pickNextProfile(state, currentName = state.activeProfile) {
-  const profiles = [...state.profiles].sort((left, right) => left.name.localeCompare(right.name));
-  if (!profiles.length) return undefined;
-  for (const profile of profiles) clearExpiredQuota(profile);
-  const start = Math.max(0, profiles.findIndex((profile) => profile.name === currentName));
-  for (let step = 1; step <= profiles.length; step += 1) {
-    const candidate = profiles[(start + step) % profiles.length];
-    if (candidate.disabled) continue;
-    if (candidate.quotaStatus === "exhausted") continue;
-    return candidate;
-  }
-  return undefined;
 }
 
 export async function codexAuthExists(path) {

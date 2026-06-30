@@ -68,8 +68,9 @@ impl Supervisor {
         self.matched_session = None;
         self.tail = None;
         self.quota_handled = false;
+        let launch_args = supervisor_launch_args(&self.current_args)?;
         let child = Command::new(&self.real_codex)
-            .args(&self.current_args)
+            .args(&launch_args)
             .current_dir(&self.cwd)
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())
@@ -134,16 +135,16 @@ impl Supervisor {
             };
             self.quota_handled = true;
             eprintln!("[cdxx] Profile '{}' reached quota.", profile_name);
-            if supervisor_failover(&profile_name, &session_id, &event)? {
+            let action = supervisor_failover(&profile_name, &session_id, &event)?;
+            if let Some(message) = action.get("message").and_then(Value::as_str) {
+                eprintln!("{message}");
+            }
+            if action.get("kind").and_then(Value::as_str) == Some("switch_and_resume") {
                 self.failover_attempts += 1;
                 if self.failover_attempts > 10 {
                     eprintln!("[cdxx] Stopping after 10 quota failover attempts.");
                     continue;
                 }
-                eprintln!(
-                    "[cdxx] Resuming Codex session {} with next profile.",
-                    session_id
-                );
                 let _ = self.stop_child();
                 self.current_args = vec!["resume".to_string(), session_id];
                 self.start_child()?;
@@ -283,6 +284,45 @@ fn start_signal_handler(supervisor: Arc<Mutex<Supervisor>>) -> Result<(), String
         }
     });
     Ok(())
+}
+
+fn supervisor_launch_args(args: &[String]) -> Result<Vec<String>, String> {
+    let payload = json!({ "args": args });
+    let encoded = base64_encode(
+        serde_json::to_string(&payload)
+            .map_err(to_string)?
+            .as_bytes(),
+    );
+    let output = if let Ok(cli_path) = env::var("CDXX_CLI_PATH") {
+        let node_path = env::var("CDXX_NODE_PATH").unwrap_or_else(|_| "node".to_string());
+        Command::new(node_path)
+            .arg(cli_path)
+            .arg("_supervisor-launch-args")
+            .arg(encoded)
+            .output()
+            .map_err(to_string)?
+    } else {
+        Command::new("cdxx")
+            .arg("_supervisor-launch-args")
+            .arg(encoded)
+            .output()
+            .map_err(to_string)?
+    };
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("launch args helper failed: {}", stderr.trim()));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value: Value = serde_json::from_str(stdout.trim()).map_err(to_string)?;
+    let argv = value
+        .get("argv")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "launch args helper did not return argv".to_string())?;
+    Ok(argv
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect())
 }
 
 fn config_dir() -> PathBuf {
@@ -649,7 +689,7 @@ fn supervisor_failover(
     profile_name: &str,
     session_id: &str,
     event: &QuotaEvent,
-) -> Result<bool, String> {
+) -> Result<Value, String> {
     let payload = json!({
         "profileName": profile_name,
         "sessionId": session_id,
@@ -683,11 +723,14 @@ fn supervisor_failover(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         eprintln!("[cdxx] failover command failed: {}", stderr.trim());
-        return Ok(false);
+        return Ok(json!({
+            "kind": "stop_retrying",
+            "reason": "policy_helper_failed",
+            "message": "[cdxx] Quota failover policy helper failed; failover stopped."
+        }));
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let value: Value = serde_json::from_str(stdout.trim()).map_err(to_string)?;
-    Ok(value.get("ok").and_then(Value::as_bool).unwrap_or(false))
+    serde_json::from_str(stdout.trim()).map_err(to_string)
 }
 
 fn terminate_process(pid: u32) {

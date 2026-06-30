@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
+import { createInterface } from "node:readline/promises";
 import { removeProfile, saveCurrentProfile, useProfile, readActiveAuthSummary } from "./auth.js";
-import { clearExpiredQuota, loadState, saveState } from "./config.js";
+import { clearExpiredQuota, effectiveYoloMode, loadState, saveState } from "./config.js";
+import { decideCodexFailover } from "./failover_policy.js";
 import { installShellIntegration, shellInit } from "./install.js";
+import { buildCodexLaunchArgsFromState } from "./launch_args.js";
 import { findRealCodex } from "./processes.js";
 import { pickNextProfile, runCodexSession } from "./session.js";
-import { recordQuotaForActiveProfile, recordQuotaForProfile, scanCodexSessions } from "./quota.js";
+import { recordQuotaForActiveProfile, scanCodexSessions } from "./quota.js";
 import { printProfiles, printScanSummary } from "./ui.js";
 
 const help = `cdxx - Codex CLI profile and quota helper
@@ -14,15 +17,16 @@ Usage:
   cdxx install                    Install codex shell function
   cdxx shell-init                 Print shell function for current terminal
   cdxx session -- [codex args]    Run Codex with live quota failover
-  cdxx save <name>                Save current $CODEX_HOME/auth.json as a profile
-  cdxx login <name>               Run 'codex login', then save as profile
-  cdxx use <name>                 Activate a saved profile
+  cdxx save [name]                Save current $CODEX_HOME/auth.json as a profile
+  cdxx login [name]               Run 'codex login', then save as profile
+  cdxx use [name]                 Activate a saved profile
   cdxx next                       Switch to next selectable profile
   cdxx list                       List profiles
   cdxx current                    Print active profile
   cdxx scan [--json] [--full] [--record]
                                   Scan local Codex sessions
   cdxx autoswitch [on|off]        Toggle live quota failover/autoswitch
+  cdxx yolo [on|off]              Auto-bypass Codex approvals/sandbox (default: on)
   cdxx remove <name>              Delete a saved profile
   cdxx status                     Show active auth summary and profiles`;
 
@@ -35,6 +39,11 @@ function takeFlag(args, name) {
 
 function requireOne(args, usage) {
   if (args.length !== 1) throw new Error(`Usage: ${usage}`);
+  return args[0];
+}
+
+function optionalName(args, usage) {
+  if (args.length > 1) throw new Error(`Usage: ${usage}`);
   return args[0];
 }
 
@@ -53,6 +62,30 @@ async function loginProfile(name) {
   const result = await saveCurrentProfile(name);
   console.log(`Saved and activated '${result.name}'${result.email ? ` (${result.email})` : ""}.`);
   return 0;
+}
+
+async function chooseProfileForUse() {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error("Usage: cdxx use [name] or run 'cdxx use' in an interactive terminal.");
+  }
+  const state = await loadState();
+  if (!state.profiles.length) throw new Error("No saved profiles.");
+  printProfiles(state);
+  const selectable = state.profiles.map((profile, index) => ({ profile, index: index + 1 }));
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = (await rl.question("Select profile number or name: ")).trim();
+    if (!answer) return undefined;
+    const byNumber = Number(answer);
+    if (Number.isInteger(byNumber)) {
+      const selected = selectable.find((entry) => entry.index === byNumber)?.profile;
+      if (!selected) throw new Error(`No profile numbered ${byNumber}.`);
+      return selected.name;
+    }
+    return answer;
+  } finally {
+    rl.close();
+  }
 }
 
 async function switchNext() {
@@ -77,6 +110,19 @@ async function setAutoswitch(value) {
   console.log(`autoswitch ${value}`);
 }
 
+async function setYolo(value) {
+  const state = await loadState();
+  if (value === undefined) {
+    console.log(`Yolo mode: ${effectiveYoloMode(state) ? "on" : "off"}`);
+    return;
+  }
+  if (value !== "on" && value !== "off") throw new Error("Usage: cdxx yolo [on|off]");
+  state.settings = state.settings ?? {};
+  state.settings.yolo = value === "on";
+  await saveState(state);
+  console.log(`Yolo mode: ${value}`);
+}
+
 function parseSupervisorPayload(encoded) {
   if (!encoded) throw new Error("Usage: cdxx _supervisor-failover <base64-json>");
   return JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
@@ -84,57 +130,20 @@ function parseSupervisorPayload(encoded) {
 
 async function supervisorFailover(encoded) {
   const payload = parseSupervisorPayload(encoded);
-  const now = new Date().toISOString();
-  const primary = Number(payload.primary ?? 0);
-  const secondary = Number(payload.secondary ?? 0);
-  const reachedType = payload.reachedType ?? null;
-  const summary = {
-    scannedFiles: 1,
-    tokenCountRecords: 1,
-    maxPrimary: primary,
-    maxSecondary: secondary,
-    firstAt: payload.timestamp ?? now,
-    lastAt: payload.timestamp ?? now,
-    planType: payload.planType,
-    lastCredits: undefined,
-    exhausted: true,
-    historicalExhausted: true,
-    exhaustedEvents: 1,
-    reason: reachedType
-      ? `rate_limit_reached_type=${reachedType}`
-      : (primary >= 100 ? "primary rate limit reached" : "secondary rate limit reached"),
-    resetAt: payload.resetAt,
-    reachedTypes: reachedType ? [String(reachedType)] : [],
-    current: {
-      file: undefined,
-      line: undefined,
-      timestamp: payload.timestamp ?? now,
-      primary,
-      secondary,
-      reachedType,
-      resetAt: payload.resetAt,
-      credits: undefined,
-      planType: payload.planType,
-    },
-    highWatermarks: [],
-  };
-  const profile = await recordQuotaForProfile(summary, payload.profileName);
-  if (!profile) {
-    console.log(JSON.stringify({ ok: false, reason: "profile_not_found" }));
-    return 0;
-  }
-  const state = await loadState();
-  if (!state.settings?.autoswitch) {
-    console.log(JSON.stringify({ ok: false, reason: "autoswitch_off" }));
-    return 0;
-  }
-  const next = pickNextProfile(state, profile.name);
-  if (!next) {
-    console.log(JSON.stringify({ ok: false, reason: "no_selectable_profile" }));
-    return 0;
-  }
-  await useProfile(next.name);
-  console.log(JSON.stringify({ ok: true, profile: next.name, sessionId: payload.sessionId }));
+  console.log(JSON.stringify(await decideCodexFailover(payload)));
+  return 0;
+}
+
+function parseSupervisorLaunchArgs(encoded) {
+  if (!encoded) throw new Error("Usage: cdxx _supervisor-launch-args <base64-json>");
+  return JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
+}
+
+async function supervisorLaunchArgs(encoded) {
+  const payload = parseSupervisorLaunchArgs(encoded);
+  console.log(JSON.stringify({
+    argv: await buildCodexLaunchArgsFromState(payload.args ?? []),
+  }));
   return 0;
 }
 
@@ -174,15 +183,17 @@ async function main() {
       if (args[0] === "--") args.shift();
       return await runCodexSession(args);
     case "save": {
-      const name = requireOne(args, "cdxx save <name>");
+      const name = optionalName(args, "cdxx save [name]");
       const result = await saveCurrentProfile(name);
       console.log(`Saved and activated '${result.name}'${result.email ? ` (${result.email})` : ""}.`);
       return 0;
     }
     case "login":
-      return await loginProfile(requireOne(args, "cdxx login <name>"));
+      return await loginProfile(optionalName(args, "cdxx login [name]"));
     case "use": {
-      const result = await useProfile(requireOne(args, "cdxx use <name>"));
+      const name = optionalName(args, "cdxx use [name]") ?? await chooseProfileForUse();
+      if (!name) return 0;
+      const result = await useProfile(name);
       console.log(`Activated '${result.name}'${result.email ? ` (${result.email})` : ""}.`);
       return 0;
     }
@@ -219,6 +230,10 @@ async function main() {
       await setAutoswitch(args.shift());
       if (args.length) throw new Error("Usage: cdxx autoswitch [on|off]");
       return 0;
+    case "yolo":
+      await setYolo(args.shift());
+      if (args.length) throw new Error("Usage: cdxx yolo [on|off]");
+      return 0;
     case "remove":
       await removeProfile(requireOne(args, "cdxx remove <name>"));
       return 0;
@@ -227,6 +242,8 @@ async function main() {
       return 0;
     case "_supervisor-failover":
       return await supervisorFailover(args.shift());
+    case "_supervisor-launch-args":
+      return await supervisorLaunchArgs(args.shift());
     default:
       throw new Error(`Unknown command: ${command}\n\n${help}`);
   }

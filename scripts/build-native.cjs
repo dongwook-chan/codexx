@@ -4,17 +4,17 @@
 const { copyFileSync, mkdirSync, chmodSync, writeFileSync } = require("node:fs");
 const { join } = require("node:path");
 const { spawnSync } = require("node:child_process");
+const {
+  supportedNativeSupervisors,
+  hostKey,
+  supportedHostText,
+} = require("./native-targets.cjs");
 
-const supported = new Map([
-  ["darwin:arm64", "cdxx-supervisor-darwin-arm64"],
-  ["linux:arm64", "cdxx-supervisor-linux-arm64"],
-]);
-
-const key = `${process.platform}:${process.arch}`;
-const binaryName = supported.get(key);
+const key = hostKey();
+const binaryName = supportedNativeSupervisors[key];
 if (!binaryName) {
   console.error(`Unsupported native build host: ${key}`);
-  console.error("Supported native build hosts: darwin:arm64, linux:arm64");
+  console.error(`Supported native build hosts: ${supportedHostText()}`);
   process.exit(1);
 }
 
@@ -39,11 +39,8 @@ import { dirname, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-const supported = new Map([
-  ["darwin:arm64", "cdxx-supervisor-darwin-arm64"],
-  ["linux:arm64", "cdxx-supervisor-linux-arm64"],
-]);
-const binary = supported.get(\`\${process.platform}:\${process.arch}\`);
+const supported = ${JSON.stringify(supportedNativeSupervisors, null, 2)};
+const binary = supported[\`\${process.platform}:\${process.arch}\`];
 if (!binary) {
   console.error(\`cdxx-supervisor does not support \${process.platform}/\${process.arch}\`);
   process.exit(1);

@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 "use strict";
 
-const expectedArch = "arm64";
-const supportedPlatforms = new Set(["darwin"]);
+const {
+  packagedNativeSupervisors,
+  hostKey,
+} = require("./native-targets.cjs");
 
-if (supportedPlatforms.has(process.platform) && process.arch === expectedArch) {
+if (packagedNativeSupervisors[hostKey()]) {
   process.exit(0);
 }
 

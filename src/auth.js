@@ -1,6 +1,6 @@
 import { chmod, copyFile, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { codexHome, ensureConfig, ensureDir, loadState, markActive, profilesDir, saveState, upsertProfile, validateProfileName } from "./config.js";
+import { codexHome, ensureConfig, ensureDir, loadState, markActive, profileNameFromIdentity, profilesDir, saveState, uniqueProfileName, upsertProfile, validateProfileName } from "./config.js";
 import { withAuthSwitchLock } from "./lock.js";
 
 export const activeAuthPath = join(codexHome, "auth.json");
@@ -42,20 +42,22 @@ export async function readActiveAuthSummary() {
 
 export async function saveCurrentProfile(inputName) {
   return await withAuthSwitchLock(async () => {
-    const name = validateProfileName(inputName);
     await stat(activeAuthPath).catch(() => {
       throw new Error(`No active Codex auth file found at ${activeAuthPath}. Run 'codex login' first.`);
     });
     await ensureConfig();
-    const profileDir = join(profilesDir, name);
-    await ensureDir(profileDir);
     const raw = await readFile(activeAuthPath, "utf8");
     const summary = summarizeAuthJson(JSON.parse(raw));
+    const state = await loadState();
+    const name = inputName
+      ? validateProfileName(inputName)
+      : resolveProfileName(state, summary);
+    const profileDir = join(profilesDir, name);
+    await ensureDir(profileDir);
     const target = profileAuthPath(name);
     await writeFile(target, raw, { mode: 0o600 });
     await chmod(target, 0o600).catch(() => undefined);
 
-    const state = await loadState();
     upsertProfile(state, name, {
       email: summary.email,
       accountId: summary.accountId,
@@ -69,6 +71,19 @@ export async function saveCurrentProfile(inputName) {
     await saveState(state);
     return { name, ...summary };
   });
+}
+
+function resolveProfileName(state, summary) {
+  const identity = summary.email ?? summary.accountId;
+  if (!identity) {
+    throw new Error("Usage: cdxx save [name]. Profile name could not be inferred because no active Codex account identity was found.");
+  }
+  const existing = state.profiles.find((profile) =>
+    profile.email === summary.email
+    || profile.accountId === summary.accountId
+  );
+  if (existing) return existing.name;
+  return uniqueProfileName(profileNameFromIdentity(identity), state);
 }
 
 export async function refreshActiveProfileCredential() {
