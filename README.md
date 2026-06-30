@@ -43,11 +43,10 @@ Native supervisor target status:
 | host | Rust source/build support | shipped by this package |
 | --- | --- | --- |
 | `darwin/arm64` | yes | yes |
-| `linux/arm64` | yes | not currently |
+| `linux/arm64` | yes | yes |
 
-The package install policy is currently `darwin/arm64`. The Rust crate and build
-scripts can build `linux/arm64`, but release tarballs should include
-`bin/cdxx-supervisor-linux-arm64` before Linux installs are enabled.
+The package install policy is `darwin/arm64` and `linux/arm64`. Other hosts can
+run only from source with the Node supervisor fallback.
 
 Native and Node supervisors are expected to agree on observable behavior:
 non-interactive Codex commands are passed through directly, interactive TUI

@@ -4,6 +4,7 @@
 const {
   packagedNativeSupervisors,
   hostKey,
+  supportedHostText,
 } = require("./native-targets.cjs");
 
 if (packagedNativeSupervisors[hostKey()]) {
@@ -13,7 +14,7 @@ if (packagedNativeSupervisors[hostKey()]) {
 console.error(
   [
     "cdxx installation aborted.",
-    "Native supervisor package currently ships darwin/arm64 only.",
+    `Native supervisor package supports ${supportedHostText()} only.`,
     `Current host is ${process.platform}/${process.arch}.`,
   ].join("\n"),
 );

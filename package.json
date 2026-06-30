@@ -47,7 +47,8 @@
     "node": ">=20"
   },
   "os": [
-    "darwin"
+    "darwin",
+    "linux"
   ],
   "cpu": [
     "arm64"

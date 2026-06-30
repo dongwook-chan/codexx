@@ -7,6 +7,7 @@ const supportedNativeSupervisors = {
 
 const packagedNativeSupervisors = {
   "darwin:arm64": "cdxx-supervisor-darwin-arm64",
+  "linux:arm64": "cdxx-supervisor-linux-arm64",
 };
 
 function hostKey(platform = process.platform, arch = process.arch) {
