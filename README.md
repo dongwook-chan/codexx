@@ -1,6 +1,6 @@
 # cdxx
 
-`cdxx` is a small Codex CLI companion inspired by `agyx`.
+`cdxx` is a small Codex CLI companion.
 
 It provides:
 
@@ -120,7 +120,7 @@ cdxx yolo on
 cdxx yolo off
 ```
 
-The `agy` flag `--dangerously-skip-permissions` is rejected when passed through
+The `--dangerously-skip-permissions` flag is rejected when passed through
 `cdxx`; it is not a Codex option.
 
 Run Codex through the wrapper:
@@ -152,7 +152,7 @@ quota event.
 
 ## Session matching
 
-Codex does not expose an `agy --log-file` style TUI transcript path option.
+Codex does not expose a direct TUI transcript path option.
 `cdxx` matches the child session from Codex's real transcript files instead:
 
 1. Snapshot `$CODEX_HOME/sessions/**/*.jsonl` immediately before launching Codex.
